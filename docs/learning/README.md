@@ -26,6 +26,7 @@ Read the files in this order:
 
 5. Phase 3: Backend startup and configuration
    - [phase-3/prerequisites.md](phase-3/prerequisites.md)
+   - [phase-3/backend-jargons.md](phase-3/backend-jargons.md)
    - [phase-3/code-walkthrough.md](phase-3/code-walkthrough.md)
    - [phase-3/important-tech-decisions.md](phase-3/important-tech-decisions.md)
    - [phase-3/correct-answers.md](phase-3/correct-answers.md)
