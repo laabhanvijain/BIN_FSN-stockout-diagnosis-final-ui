@@ -37,18 +37,24 @@ Read the files in this order:
    - [phase-4/important-tech-decisions.md](phase-4/important-tech-decisions.md)
    - [phase-4/correct-answers.md](phase-4/correct-answers.md)
 
-7. [00-overall-flow.md](00-overall-flow.md)
+7. Phase 5: ETL from StarRocks to NebulaGraph
+   - [phase-5/prerequisites.md](phase-5/prerequisites.md)
+   - [phase-5/code-walkthrough.md](phase-5/code-walkthrough.md)
+   - [phase-5/important-tech-decisions.md](phase-5/important-tech-decisions.md)
+   - [phase-5/correct-answers.md](phase-5/correct-answers.md)
+
+8. [00-overall-flow.md](00-overall-flow.md)
    - What the project does.
    - What happens from user click to database query to UI result.
    - How the backend, frontend, databases, graph, LLM, and Docker fit together.
 
-8. [01-step-by-step-learning-plan.md](01-step-by-step-learning-plan.md)
+9. [01-step-by-step-learning-plan.md](01-step-by-step-learning-plan.md)
    - The full learning roadmap.
    - What concepts to learn before each module.
    - Which files to study.
    - Checkpoints and small exercises.
 
-9. [02-glossary.md](02-glossary.md)
+10. [02-glossary.md](02-glossary.md)
    - Project terms, warehouse terms, and tech-stack terms in plain English.
 
 How to use this folder:
