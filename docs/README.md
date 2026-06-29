@@ -33,6 +33,7 @@ docs/
 | A specific topic's notes | `journal/0x-*.md` (see [journal/README.md](journal/README.md)) |
 | The architecture | [deliverables/HLD/README.md](deliverables/HLD/README.md) |
 | Exact schemas / endpoints / algorithms | [deliverables/LLD/README.md](deliverables/LLD/README.md) |
+| A beginner-friendly step-by-step learning path | [learning/README.md](learning/README.md) |
 | Why each technical decision was made | [deliverables/HLD/05-technical-decisions.md](deliverables/HLD/05-technical-decisions.md) · [journal/09-decisions.md](journal/09-decisions.md) |
 | What a built module actually does | [code-walkthroughs/README.md](code-walkthroughs/README.md) |
 
