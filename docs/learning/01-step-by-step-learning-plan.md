@@ -13,11 +13,50 @@ Use this loop for every phase:
 
 1. Read the beginner explanation in this folder.
 2. Learn the prerequisite concepts.
-3. Open the listed files.
-4. Trace one real runtime example.
-5. Answer the checkpoint questions.
-6. Do the small exercise.
-7. Only then move to the next phase.
+3. Read the complete listed files for that phase.
+4. Explain the phase-relevant parts of those files in detail.
+5. Identify what is core logic, configuration, boilerplate, or supporting docs.
+6. Trace one real runtime example.
+7. Answer the checkpoint questions.
+8. Do the small exercise.
+9. Only then move to the next phase.
+
+## Per-Phase Walkthrough Method
+
+For every phase, we will use this exact teaching pattern:
+
+1. **Prerequisites first**
+   - Explain every required concept from scratch.
+   - Avoid assuming prior knowledge of the tech stack.
+
+2. **Read complete files**
+   - Open and inspect every file listed in that phase.
+   - If a file is long, still inspect the full file before explaining it.
+   - Do not claim what a file does without checking it.
+
+3. **Explain relevant parts deeply**
+   - Explain the parts that matter for the current phase.
+   - Separate business logic from infrastructure, configuration, UI code,
+     boilerplate, and documentation.
+   - Mention which parts are safe to skim and why.
+
+4. **Connect files to execution flow**
+   - Explain what calls what.
+   - Explain what data enters and leaves each important file.
+   - Trace at least one concrete example through the phase.
+
+5. **Teach the code like a beginner class**
+   - Explain important functions, classes, variables, schemas, routes, and
+     configuration values.
+   - Explain technical terms when they first appear.
+   - Use examples instead of vague descriptions.
+
+6. **Check understanding**
+   - Give a concise recap.
+   - List the most important takeaways.
+   - Ask checkpoint questions.
+   - Give one small code-navigation or reasoning exercise.
+   - Wait for your answer before moving to the next major phase.
 
 ## Phase 0: Project Orientation
 
