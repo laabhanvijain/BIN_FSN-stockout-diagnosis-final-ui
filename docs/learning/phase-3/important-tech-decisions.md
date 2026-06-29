@@ -1,5 +1,19 @@
 # Phase 3 Important Technical Decisions
+**routers = receive HTTP requests**
+**services = do the actual work**
+**db = connect to databases**
 
+backend/routers/
+  -> "Someone called /api/diagnoses. What should I do?"
+
+backend/services/
+  -> "Here is how to compute diagnoses, query graph signals, run the assistant, or manage feedback."
+
+backend/db/
+  -> "Here is how to connect to StarRocks or NebulaGraph."
+
+
+  
 This file captures the important backend startup and configuration decisions.
 
 ## Decision 1: Centralize Config In `backend/config.py`

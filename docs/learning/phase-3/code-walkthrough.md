@@ -394,78 +394,6 @@ Meaning:
 Stop the background scheduler when the backend shuts down.
 ```
 
-## FastAPI App
-
-```python
-app = FastAPI(
-    title="BIN-FSN Stockout Diagnosis",
-    description=...,
-    version="0.1.0",
-    lifespan=lifespan,
-)
-```
-
-This creates the backend application and attaches the startup/shutdown lifecycle.
-
-## CORS Middleware
-
-```python
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-```
-
-Meaning:
-
-```text
-Allow browser clients to call this backend.
-```
-
-Important production note:
-
-```text
-allow_origins=["*"] is permissive.
-For production, restrict it to the real frontend origin.
-```
-
-## Routers
-
-```python
-from backend.routers import diagnoses, ask, feedback
-app.include_router(diagnoses.router, prefix="/api", tags=["diagnoses"])
-app.include_router(ask.router, prefix="/api", tags=["assistant"])
-app.include_router(feedback.router, prefix="/api", tags=["feedback"])
-```
-
-Meaning:
-
-```text
-Mount diagnoses endpoints under /api.
-Mount assistant endpoints under /api.
-Mount feedback endpoints under /api.
-```
-
-So later endpoints become:
-
-```text
-/api/diagnoses
-/api/ask
-/api/feedback
-```
-
-## Health Endpoint
-
-```python
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-```
-
-This is a simple endpoint to check whether the backend is alive.
-
 ## File 5: `backend/requirements.txt`
 
 ### Purpose
@@ -485,6 +413,33 @@ Important packages:
 | `openai` | Calls Ollama through OpenAI-compatible API. |
 | `apscheduler` | Runs ETL sync every minute. |
 | `python-dotenv` | Supports `.env` loading. |
+
+
+## File 5: `backend/services`
+routers = receive HTTP requests
+services = do the actual work
+db = connect to databases
+
+backend/routers/
+  -> "Someone called /api/diagnoses. What should I do?"
+
+backend/services/
+  -> "Here is how to compute diagnoses, query graph signals, run the assistant, or manage feedback."
+
+backend/db/
+  -> "Here is how to connect to StarRocks or NebulaGraph."
+
+
+  
+Let’s classify them.
+File	        Main Role
+diagnosis.py	Computes deterministic diagnosis rows from StarRocks
+graph.py	    Queries NebulaGraph for graph signals
+feedback.py	    Manages recommendation lifecycle and failure deltas
+agent.py	    Runs the LLM assistant tool loop
+llm.py	        Creates/calls the Ollama/OpenAI-compatible client
+guards.py	    Validates SQL/nGQL and normalizes values
+prompts.py	    Builds system prompts and assistant guidance
 
 ## Phase 3 Runtime Flow
 
