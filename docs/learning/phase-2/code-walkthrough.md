@@ -498,3 +498,119 @@ That is the bridge from table data to graph data.
 3. StarRocks stores table data for SQL aggregation.
 4. NebulaGraph stores nodes and edges for relationship queries.
 5. Dummy data is carefully designed to prove each verdict and graph signal.
+
+## One-Time Seed Vs Continuous Generation
+
+There are two different data-generation scripts in the project.
+
+### 1. `data/generate_dummy_data.py`
+
+This is the one-time deterministic seed script.
+
+It contains:
+
+```python
+BASE_DT = datetime.datetime.now() - datetime.timedelta(hours=6)
+```
+
+Meaning:
+
+```text
+Start seeded event timestamps around 6 hours before the current time.
+```
+
+Then each scenario adds minute offsets using:
+
+```python
+_dt(offset_minutes)
+```
+
+Because the default diagnosis window is:
+
+```text
+last 1 day
+```
+
+the seeded rows are intentionally inside the active diagnosis window.
+
+Important:
+
+```text
+generate_dummy_data.py does not continuously generate rows.
+It inserts a fixed demo dataset once per run.
+```
+
+Typical command:
+
+```bash
+python data/generate_dummy_data.py --clear
+```
+
+### 2. `data/data_generator.py`
+
+This is the continuous/live data generator.
+
+It has:
+
+```python
+parser.add_argument("--interval", type=int, default=2)
+```
+
+Meaning:
+
+```text
+By default, generate one batch every 2 seconds.
+```
+
+Run continuously:
+
+```bash
+python data/data_generator.py
+```
+
+Generate once:
+
+```bash
+python data/data_generator.py --once
+```
+
+Use a custom interval:
+
+```bash
+python data/data_generator.py --interval 5
+```
+
+Meaning:
+
+```text
+Generate one batch every 5 seconds.
+```
+
+Generate a limited number of batches:
+
+```bash
+python data/data_generator.py --batches 10
+```
+
+The event rotation is:
+
+```text
+repeat -> repeat -> inventory_adjust -> new_bin -> new_fsn
+```
+
+Important caution:
+
+```text
+data/data_generator.py references an inventory_items table in some event types,
+but Phase 2's StarRocks schema only creates pendency_mv and recommendation_log.
+```
+
+So the continuous generator may need extra schema support or adjustment before
+all event types run cleanly.
+
+Simple memory hook:
+
+```text
+generate_dummy_data.py = one-time known demo stories
+data_generator.py      = repeated/live event stream
+```
