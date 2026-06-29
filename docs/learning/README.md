@@ -31,18 +31,24 @@ Read the files in this order:
    - [phase-3/important-tech-decisions.md](phase-3/important-tech-decisions.md)
    - [phase-3/correct-answers.md](phase-3/correct-answers.md)
 
-6. [00-overall-flow.md](00-overall-flow.md)
+6. Phase 4: Diagnoses API
+   - [phase-4/prerequisites.md](phase-4/prerequisites.md)
+   - [phase-4/code-walkthrough.md](phase-4/code-walkthrough.md)
+   - [phase-4/important-tech-decisions.md](phase-4/important-tech-decisions.md)
+   - [phase-4/correct-answers.md](phase-4/correct-answers.md)
+
+7. [00-overall-flow.md](00-overall-flow.md)
    - What the project does.
    - What happens from user click to database query to UI result.
    - How the backend, frontend, databases, graph, LLM, and Docker fit together.
 
-7. [01-step-by-step-learning-plan.md](01-step-by-step-learning-plan.md)
+8. [01-step-by-step-learning-plan.md](01-step-by-step-learning-plan.md)
    - The full learning roadmap.
    - What concepts to learn before each module.
    - Which files to study.
    - Checkpoints and small exercises.
 
-8. [02-glossary.md](02-glossary.md)
+9. [02-glossary.md](02-glossary.md)
    - Project terms, warehouse terms, and tech-stack terms in plain English.
 
 How to use this folder:
