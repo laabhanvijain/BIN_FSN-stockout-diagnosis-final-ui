@@ -1,0 +1,19 @@
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+pydantic==2.7.1
+pydantic-settings==2.2.1
+
+# StarRocks / MySQL-compatible protocol
+PyMySQL==1.1.0
+
+# NebulaGraph
+nebula3-python==3.8.2
+
+# LLM (Ollama via OpenAI-compatible API)
+openai>=1.50.0
+
+# Scheduler (ETL sync)
+apscheduler==3.10.4
+
+# Utilities
+python-dotenv==1.0.1

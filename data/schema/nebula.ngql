@@ -1,0 +1,71 @@
+-- ============================================================
+-- NebulaGraph DDL — BIN-FSN Stockout Diagnosis
+-- ============================================================
+-- Run once inside the NebulaGraph console or via the Python
+-- client after the graph store is up.
+--
+-- Graph model:
+--   Nodes: FSN, BIN, Picker, Order, GRN, Variance
+--   Edges: FAILED_AT, PICKED_FROM, ASSIGNED_TO,
+--          RECEIVED_IN, PUTAWAY_TO, STOCKTAKE
+-- ============================================================
+
+-- Space: one logical database per deployment
+CREATE SPACE IF NOT EXISTS stockout (
+    partition_num  = 10,
+    replica_factor = 1,
+    vid_type       = FIXED_STRING(128)
+);
+
+USE stockout;
+
+-- ------------------------------------------------------------
+-- Tags (node types)
+-- ------------------------------------------------------------
+CREATE TAG IF NOT EXISTS FSN     (fsn         STRING NOT NULL);
+CREATE TAG IF NOT EXISTS BIN     (label       STRING NOT NULL,
+                                  warehouse_id STRING NOT NULL);
+CREATE TAG IF NOT EXISTS Picker  (picker_id   STRING NOT NULL);
+CREATE TAG IF NOT EXISTS `Order` (order_id    STRING NOT NULL);
+CREATE TAG IF NOT EXISTS GRN     (grn_id      STRING NOT NULL);
+CREATE TAG IF NOT EXISTS Variance(variance_id  STRING,
+                                  variance_type STRING);
+
+-- ------------------------------------------------------------
+-- Edge types
+-- ------------------------------------------------------------
+-- FSN  -> BIN   : this FSN had an INF at this BIN
+CREATE EDGE IF NOT EXISTS FAILED_AT   (last_seen INT64);
+
+-- Order -> BIN  : this order was being picked from this BIN
+CREATE EDGE IF NOT EXISTS PICKED_FROM ();
+
+-- Picker -> BIN : this picker was assigned picks at this BIN
+CREATE EDGE IF NOT EXISTS ASSIGNED_TO ();
+
+-- FSN  -> GRN   : this FSN was received in this inbound batch
+CREATE EDGE IF NOT EXISTS RECEIVED_IN ();
+
+-- GRN  -> BIN   : this inbound batch was putaway to this BIN
+CREATE EDGE IF NOT EXISTS PUTAWAY_TO  ();
+
+-- BIN  -> Variance : a stocktake was done on this BIN (closed-loop signal)
+CREATE EDGE IF NOT EXISTS STOCKTAKE   (done_at INT64);
+
+-- ------------------------------------------------------------
+-- Tag indexes (required for MATCH / LOOKUP on properties)
+-- ------------------------------------------------------------
+CREATE TAG INDEX IF NOT EXISTS idx_fsn_fsn      ON FSN(fsn(32));
+CREATE TAG INDEX IF NOT EXISTS idx_bin_label    ON BIN(label(32));
+CREATE TAG INDEX IF NOT EXISTS idx_bin_wh       ON BIN(warehouse_id(32));
+CREATE TAG INDEX IF NOT EXISTS idx_picker_id    ON Picker(picker_id(32));
+CREATE TAG INDEX IF NOT EXISTS idx_order_id     ON `Order`(order_id(32));
+CREATE TAG INDEX IF NOT EXISTS idx_grn_id       ON GRN(grn_id(32));
+
+-- Activate indexes immediately
+REBUILD TAG INDEX idx_fsn_fsn;
+REBUILD TAG INDEX idx_bin_label;
+REBUILD TAG INDEX idx_bin_wh;
+REBUILD TAG INDEX idx_picker_id;
+REBUILD TAG INDEX idx_order_id;
+REBUILD TAG INDEX idx_grn_id;

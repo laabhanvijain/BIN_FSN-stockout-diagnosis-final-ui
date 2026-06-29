@@ -1,0 +1,153 @@
+version: "3.8"
+
+# Full demo stack for BIN-FSN Stockout Diagnosis.
+#
+# Services:
+#   starrocks-fe    — StarRocks Frontend  (MySQL SQL on :9030, HTTP on :8030)
+#   starrocks-be    — StarRocks Backend   (data node)
+#   nebula-metad    — NebulaGraph meta service
+#   nebula-storaged — NebulaGraph storage service
+#   nebula-graphd   — NebulaGraph query engine (:9669)
+#   backend         — FastAPI app (:8000)
+#   frontend        — Vite dev server (:3000)
+#
+# Quick start:
+#   cp .env.example .env          # fill in ANTHROPIC_API_KEY
+#   docker compose -f infra/docker-compose.yml up --build
+#   # In a second terminal, once stores are healthy:
+#   bash infra/init_schema.sh     # create tables + graph schema
+#   python data/generate_dummy_data.py --clear   # seed demo data
+#   open http://localhost:3000
+
+services:
+
+  # ── StarRocks ────────────────────────────────────────────────────────────────
+  starrocks-fe:
+    image: starrocks/allin1-ubuntu:3.2-latest
+    hostname: starrocks-fe
+    container_name: starrocks-fe
+    ports:
+      - "8030:8030"   # HTTP / admin UI
+      - "9030:9030"   # MySQL-compatible SQL
+    volumes:
+      - sr-fe-data:/data/deploy/starrocks/fe/meta
+      - sr-be-data:/data/deploy/starrocks/be/storage
+    environment:
+      - TZ=Asia/Kolkata
+    healthcheck:
+      test: ["CMD-SHELL", "mysql -uroot -h127.0.0.1 -P9030 -e 'show frontends' >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+    networks:
+      - demo-net
+
+  # ── NebulaGraph ──────────────────────────────────────────────────────────────
+  # Uses nightly images which publish native arm64 layers.
+  # Versioned releases (v3.6, v3.8) are x86-only and fail silently under
+  # QEMU emulation on Apple Silicon / Rancher Desktop.
+  nebula-metad:
+    image: vesoft/nebula-metad:nightly
+    hostname: nebula-metad
+    container_name: nebula-metad
+    environment:
+      USER: root
+    command:
+      - --meta_server_addrs=nebula-metad:9559
+      - --local_ip=nebula-metad
+      - --ws_ip=nebula-metad
+      - --port=9559
+      - --ws_http_port=19559
+    volumes:
+      - nebula-meta:/data/meta
+    networks:
+      - demo-net
+
+  nebula-storaged:
+    image: vesoft/nebula-storaged:nightly
+    hostname: nebula-storaged
+    container_name: nebula-storaged
+    environment:
+      USER: root
+    command:
+      - --meta_server_addrs=nebula-metad:9559
+      - --local_ip=nebula-storaged
+      - --ws_ip=nebula-storaged
+      - --port=9779
+      - --ws_http_port=19779
+    depends_on:
+      - nebula-metad
+    volumes:
+      - nebula-storage:/data/storage
+    networks:
+      - demo-net
+
+  nebula-graphd:
+    image: vesoft/nebula-graphd:nightly
+    hostname: nebula-graphd
+    container_name: nebula-graphd
+    environment:
+      USER: root
+    command:
+      - --meta_server_addrs=nebula-metad:9559
+      - --local_ip=nebula-graphd
+      - --ws_ip=nebula-graphd
+      - --port=9669
+      - --ws_http_port=19669
+    ports:
+      - "9669:9669"   # nGQL / client connections
+    depends_on:
+      - nebula-storaged
+    networks:
+      - demo-net
+
+  # ── FastAPI Backend ───────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.backend
+    container_name: backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    environment:
+      - STARROCKS_HOST=starrocks-fe
+      - NEBULA_HOST=nebula-graphd
+      - LLM_BASE_URL=http://host.docker.internal:11434/v1
+    depends_on:
+      starrocks-fe:
+        condition: service_healthy
+      nebula-graphd:
+        condition: service_started
+    networks:
+      - demo-net
+    restart: on-failure
+
+  # ── React Frontend ────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.frontend
+    container_name: frontend
+    ports:
+      - "3000:3000"
+    environment:
+      # VITE_BACKEND_URL is used by vite.config.js proxy
+      # In Docker, use service name; for local dev, set to http://localhost:8000
+      - VITE_BACKEND_URL=http://backend:8000
+    depends_on:
+      - backend
+    networks:
+      - demo-net
+
+volumes:
+  sr-fe-data:
+  sr-be-data:
+  nebula-meta:
+  nebula-storage:
+
+networks:
+  demo-net:
+    driver: bridge
