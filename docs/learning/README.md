@@ -13,18 +13,23 @@ Read the files in this order:
    - The detailed project problem in beginner language.
    - INF, FSN, BIN, phantom inventory, genuine stockout, and the main runtime flow.
 
-3. [00-overall-flow.md](00-overall-flow.md)
+3. Phase 1: Warehouse domain and business rules
+   - [phase-1/prerequisites.md](phase-1/prerequisites.md)
+   - [phase-1/code-walkthrough.md](phase-1/code-walkthrough.md)
+   - [phase-1/important-tech-decisions.md](phase-1/important-tech-decisions.md)
+
+4. [00-overall-flow.md](00-overall-flow.md)
    - What the project does.
    - What happens from user click to database query to UI result.
    - How the backend, frontend, databases, graph, LLM, and Docker fit together.
 
-4. [01-step-by-step-learning-plan.md](01-step-by-step-learning-plan.md)
+5. [01-step-by-step-learning-plan.md](01-step-by-step-learning-plan.md)
    - The full learning roadmap.
    - What concepts to learn before each module.
    - Which files to study.
    - Checkpoints and small exercises.
 
-5. [02-glossary.md](02-glossary.md)
+6. [02-glossary.md](02-glossary.md)
    - Project terms, warehouse terms, and tech-stack terms in plain English.
 
 How to use this folder:
