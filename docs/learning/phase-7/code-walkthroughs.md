@@ -32,14 +32,99 @@ User types question
 
 ## `backend/routers/ask.py`
 
-This file defines the HTTP endpoint:
+This file is the FastAPI router for the LLM assistant.
+
+It exposes the backend endpoint that the frontend chat UI calls.
+
+The route is:
+
+```text
+POST /api/ask
+```
+
+In FastAPI, this file does not become `/api/ask` all by itself. It defines `/ask`, and `backend/main.py` mounts all routers under the `/api` prefix.
+
+So the local route in this file is:
 
 ```python
 @router.post("/ask", response_model=AskResponse)
-def post_ask(req: AskRequest):
 ```
 
-The request model is:
+And the actual browser-facing route becomes:
+
+```text
+/api/ask
+```
+
+## What This File Is Responsible For
+
+`ask.py` is responsible for the API boundary.
+
+That means it handles:
+
+- the incoming HTTP request
+- request body validation
+- response body shape
+- error conversion into HTTP errors
+- calling the real assistant logic in `agent.py`
+
+It does not directly:
+
+- call Ollama
+- write prompts
+- run SQL
+- run nGQL
+- decide verdicts
+- synthesize final reasoning
+
+Those jobs belong to service files such as `agent.py`, `llm.py`, `prompts.py`, and `guards.py`.
+
+Correct mental model:
+
+```text
+ask.py = receptionist / API door
+agent.py = investigator / reasoning engine
+llm.py = phone line to Ollama
+prompts.py = instructions for the assistant
+guards.py = safety checker
+```
+
+## Imports
+
+The file starts with:
+
+```python
+import logging
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+
+from backend.services.agent import ask
+```
+
+`logging` lets the backend record errors.
+
+`APIRouter` lets this file define a group of API routes.
+
+`HTTPException` lets the code return a proper HTTP error response, such as status code `503`.
+
+`BaseModel` and `Field` come from Pydantic. They define and validate request/response shapes.
+
+`ask` is imported from `backend.services.agent`. This is the real LLM assistant function.
+
+## Router And Logger
+
+```python
+router = APIRouter()
+logger = logging.getLogger(__name__)
+```
+
+`router` is where endpoints are registered.
+
+`logger` is used when something fails, especially in `post_ask()`.
+
+`__name__` means the logger name will match this Python module, which helps identify where logs came from.
+
+## `AskRequest`
 
 ```python
 class AskRequest(BaseModel):
@@ -48,29 +133,287 @@ class AskRequest(BaseModel):
     depth_mode: str = "FAST"
 ```
 
-The response model is:
+This class describes the JSON body that the frontend must send.
+
+Example request:
+
+```json
+{
+  "question": "Why is BIN-PICKER-A failing?",
+  "warehouse_id": "WH-BLR-001",
+  "depth_mode": "FAST"
+}
+```
+
+Field meanings:
+
+`question` is the user's natural-language question.
+
+`warehouse_id` scopes the investigation to one warehouse.
+
+`depth_mode` controls how much time the assistant can spend.
+
+Current modes:
+
+```text
+FAST = shorter budget, quick answer
+THOROUGH = longer budget, deeper investigation
+```
+
+Important detail:
+
+In the current model, `warehouse_id` is required by the backend because it is typed as `str` with no default.
+
+However, `frontend/src/api.js` only sends `warehouse_id` if one exists:
+
+```javascript
+...(warehouseId && { warehouse_id: warehouseId })
+```
+
+So if the frontend ever calls `askQuestion()` without a warehouse ID, FastAPI will reject the request with a validation error.
+
+That is worth remembering while debugging.
+
+## `CitationItem`
+
+```python
+class CitationItem(BaseModel):
+    id: str = Field(description="Citation reference (e.g. c1)")
+    engine: str = Field(description="starrocks or nebulagraph")
+    query: str = Field(description="SQL or nGQL executed")
+    row_count: int
+```
+
+This defines what one citation looks like in the API response.
+
+A citation is the proof behind an assistant claim.
+
+Example citation:
+
+```json
+{
+  "id": "c1",
+  "engine": "starrocks",
+  "query": "SELECT COUNT(DISTINCT picklist_item_fsn) ...",
+  "row_count": 1
+}
+```
+
+Notice that this response model does not expose full rows to the frontend.
+
+`agent.py` internally stores `rows` inside citations, but `AskResponse` only returns:
+
+```text
+id, engine, query, row_count
+```
+
+This is one reason the current frontend citation display can drift, because `Assistant.jsx` expects older fields such as `rows` and `type`.
+
+## `AskResponse`
 
 ```python
 class AskResponse(BaseModel):
     answer: str
     citations: list[CitationItem]
-    partial: bool
-    iterations: int
-    elapsed_ms: int
+    partial: bool = Field(description="True if answer is incomplete due to timeout")
+    iterations: int = Field(description="Number of LLM tool loops")
+    elapsed_ms: int = Field(description="Time taken in milliseconds")
 ```
 
-So `ask.py` is the HTTP wrapper.
+This class describes what the backend sends back to the frontend.
 
-It does not do the actual reasoning.
+Field meanings:
 
-It calls:
+`answer` is the final natural-language answer shown to the user.
+
+`citations` is the list of evidence sources used.
+
+`partial` tells whether the answer may be incomplete because the assistant hit its time budget.
+
+`iterations` tells how many LLM/tool-loop rounds happened.
+
+`elapsed_ms` tells how long the assistant request took.
+
+Example response:
+
+```json
+{
+  "answer": "BIN-PICKER-A shows picker concentration... Recommended action: verify picker process.",
+  "citations": [
+    {
+      "id": "c1",
+      "engine": "starrocks",
+      "query": "SELECT ...",
+      "row_count": 1
+    }
+  ],
+  "partial": false,
+  "iterations": 3,
+  "elapsed_ms": 4210
+}
+```
+
+## `post_ask(req: AskRequest)`
+
+This is the main endpoint.
+
+```python
+@router.post("/ask", response_model=AskResponse)
+def post_ask(req: AskRequest):
+```
+
+When a user sends a chat question, FastAPI:
+
+1. Receives the HTTP request.
+2. Parses the JSON body.
+3. Validates it against `AskRequest`.
+4. Calls `post_ask(req)`.
+5. Validates the returned object against `AskResponse`.
+6. Sends JSON back to the frontend.
+
+Inside the endpoint:
 
 ```python
 result = ask(req.question, req.warehouse_id, req.depth_mode)
 ```
 
-That `ask()` function comes from `backend/services/agent.py`.
+This is the handoff from router to service layer.
 
+The router says:
+
+```text
+I received a valid API request. Agent, please investigate this question.
+```
+
+Then `agent.py` handles the actual reasoning.
+
+## Why It Wraps The Result In `AskResponse`
+
+The agent returns a plain Python dictionary.
+
+The router converts it into a typed response:
+
+```python
+return AskResponse(
+    answer=result["answer"],
+    citations=[CitationItem(**c) for c in result["citations"]],
+    partial=result.get("partial", False),
+    iterations=result.get("iterations", 0),
+    elapsed_ms=result.get("elapsed_ms", 0),
+)
+```
+
+This has two benefits.
+
+First, FastAPI gets a clean predictable response shape.
+
+Second, if the agent returns extra internal data, the API does not automatically expose all of it.
+
+For example, `agent.py` citations may include `rows`, but `CitationItem` does not define `rows`, so the response model only exposes the allowed citation fields.
+
+## Error Handling
+
+The endpoint catches unexpected exceptions:
+
+```python
+except Exception:
+    logger.exception("POST /ask failed")
+    raise HTTPException(
+        detail="LLM assistant not available. Check Ollama is running and LLM_BASE_URL is configured.",
+        status_code=503,
+    )
+```
+
+This means if the assistant fails badly, the API returns:
+
+```text
+503 Service Unavailable
+```
+
+A `503` means:
+
+```text
+The server exists, but this service is temporarily unavailable.
+```
+
+That is appropriate for cases like:
+
+- Ollama is not running.
+- LLM config is wrong.
+- agent call crashes unexpectedly.
+
+Small caveat:
+
+This catches all exceptions and returns the same message. That is simple for users, but in production we may want more specific errors for validation, model timeout, database failure, and graph failure.
+
+## `GET /ask/available`
+
+```python
+@router.get("/ask/available")
+def get_ask_available():
+```
+
+This is a small health-check endpoint.
+
+Its job is to answer:
+
+```text
+Is the assistant configured enough to be available?
+```
+
+It tries to create the LLM client:
+
+```python
+from backend.services.llm import get_client
+client = get_client()
+return True
+```
+
+If anything fails, it returns `False`.
+
+Important caveat:
+
+This function creates the client, but it does not actually send a test message to Ollama.
+
+So it mostly checks whether client construction works, not whether the model is fully reachable and healthy.
+
+A stronger production health check would make a tiny request to the LLM or call the Ollama model list endpoint.
+
+## Full Request Flow Through This File
+
+Example user question:
+
+```text
+Why is BIN-PICKER-A failing?
+```
+
+Flow:
+
+```text
+Assistant.jsx
+-> api.js askQuestion()
+-> POST /api/ask
+-> ask.py validates AskRequest
+-> post_ask() calls agent.ask()
+-> agent.py runs LLM/tool loop
+-> ask.py shapes result into AskResponse
+-> frontend receives answer/citations/metadata
+```
+
+## What To Remember
+
+`ask.py` is thin by design.
+
+A good router should mostly handle HTTP concerns and delegate business logic to services.
+
+In this project:
+
+```text
+ask.py should stay small.
+agent.py is allowed to be complex.
+```
+
+That separation keeps the API layer easier to understand and test.
 ## `backend/services/llm.py`
 
 This file creates the LLM client.
@@ -453,3 +796,4 @@ Ollama single-model tool loop in agent.py
 ```
 
 So when studying Phase 7, trust the current code and `docs/MIGRATION-TO-OLLAMA.md` more than the old walkthrough.
+
