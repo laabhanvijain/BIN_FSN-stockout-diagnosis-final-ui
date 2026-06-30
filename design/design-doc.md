@@ -1,233 +1,437 @@
-# BIN-FSN Stockout Diagnosis — Design Document
+# BIN-FSN Stockout Diagnosis - Design Document
 
-> Status: Draft v1 · Owner: Intern project · Audience: Eng leads, store-ops stakeholders
-> Related: [../explanation/context-repository.md](../explanation/context-repository.md) · [milestones.md](milestones.md) · [briefing PDF](../BIN-FSN%20Stockout%20Diagnosis%20%E2%80%94%20Intern%20Briefing%20Document.pdf)
+> Status: Current design, post-M11 Ollama migration  
+> Owner: Intern project  
+> Audience: Engineering leads, store-ops stakeholders, project reviewers  
+> Related: [../explanation/context-repository.md](../explanation/context-repository.md), [milestones.md](milestones.md), [../docs/learning/README.md](../docs/learning/README.md)
 
 ---
 
-## 1. Problem 1-Pager
+## 1. Executive Summary
+
+BIN-FSN Stockout Diagnosis is a web UI plus graph/LLM assistant for diagnosing warehouse pick failures. When a picker cannot find an item in its assigned BIN, the event becomes an INF-like failure and may create an IRT. Today, the existing signal can show which FSN/BIN combinations are failing, but the root-cause investigation still requires manual work across dashboards and can take 3-5 days.
+
+This project reduces that investigation to minutes by:
+
+- reading recent INF-like events from StarRocks;
+- applying deterministic verdict rules from the problem statement;
+- syncing useful relationships into NebulaGraph;
+- letting an Ollama-powered assistant query SQL and graph evidence with citations;
+- tracking recommendation outcomes through a feedback loop.
+
+The design deliberately keeps the deterministic SQL verdict as the foundation. Graph evidence and the LLM assistant enrich and explain the diagnosis, but the system remains useful even if NebulaGraph or Ollama is temporarily unavailable.
+
+---
+
+## 2. Problem Statement
 
 | Field | Detail |
-|-------|--------|
-| **Context** | In Flipkart Hyperlocal dark stores, items (FSN) live in labeled slots (BIN, e.g. `F1-05-5D`). When a picker can't find an FSN in its BIN, they raise an **INF** (Item Not Found), which spawns an **IRT** (Inventory Resolution Ticket), fails the customer order, and drops the store's fill rate. |
-| **Problem** | The existing **S11** signal flags *which* FSN/BIN pairs keep failing but gives **no root cause**. Diagnosing the "why" manually takes an analyst **3-5 days** across many dashboards. |
-| **Goal** | Reduce diagnostic latency from days to **minutes** via an automated Web UI + Graph/LLM assistant that maps every failure to an **actionable category** with cited evidence. |
-| **Non-Goals** | No new StarRocks MVs · no Slack/email/push · no automated/unattended stocktake execution · no ML forecasting or picker coaching · no LLM fine-tuning. |
-| **Constraints** | Verdict accuracy **>= 70%** vs analyst · e2e latency **< 10s** · **every** assistant claim must cite SQL/graph evidence · pilot 1 dark store for **>= 1 week**. |
+| --- | --- |
+| Context | In Flipkart Hyperlocal dark stores, items are identified by FSN and stored in physical BIN locations such as `F1-05-5D`. When a picker cannot find an item in a BIN, they raise an INF-like event, which can create an IRT and hurt fill rate. |
+| Problem | Existing signals identify repeated failing FSN/BIN pairs, but they do not explain whether the failure is caused by phantom inventory, true stockout, picker/process issues, inbound problems, or stale inventory state. |
+| Goal | Produce actionable, evidence-backed diagnoses in minutes instead of 3-5 days. |
+| Primary actions | Stocktake the BIN for phantom inventory; replenish the FSN for genuine stockout; investigate both for dual cases. |
+| Non-goals | No new StarRocks materialized views, no Slack/email/push automation, no unattended stocktake execution, no ML forecasting, no picker coaching, no LLM fine-tuning. |
+| Success targets | Verdict accuracy >= 70% vs analyst judgment; end-to-end latency < 10s for normal interactions; 100% citation coverage for assistant claims; pilot for at least one dark store. |
 
 ---
 
-## 2. Core Diagnostic Logic (from the PS)
+## 3. Core Diagnosis Logic
 
-The diagnostic paradigm is a 2-axis classification over INF events:
+The core business logic is a two-axis classification over recent INF-like failures.
 
-| Diagnostic Insight | Root Cause | Action |
-|--------------------|-----------|--------|
-| Many **distinct FSNs** failing in the **same BIN** | **PHANTOM INVENTORY** | **Stocktake the BIN** — system thinks stock is present, but it is physically misplaced/stolen/missing |
-| The **same FSN** failing across **many distinct BINs** | **GENUINE STOCKOUT** | **Replenish the FSN** — inventory depleted across the facility |
+| Pattern | Interpretation | Operational action |
+| --- | --- | --- |
+| Many distinct FSNs fail in the same BIN | Phantom inventory | Stocktake the BIN |
+| The same FSN fails across many BINs | Genuine stockout | Replenish the FSN |
+| Both patterns are present | Dual signal | Stocktake and replenish/investigate |
+| Neither pattern is strong | Ambiguous | Investigate manually with evidence |
 
-### Verdict thresholds (from the PS validation SQL)
+The deterministic verdict rule is:
 
+```text
+distinct_fsns >= 3 AND distinct_bins >= 2 -> DUAL
+distinct_fsns >= 3                        -> PHANTOM_INVENTORY
+distinct_bins >= 2                        -> GENUINE_STOCKOUT
+else                                      -> AMBIGUOUS
 ```
-distinct_fsns >= 3 AND distinct_bins >= 2  ->  DUAL
-distinct_fsns >= 3                         ->  PHANTOM
-distinct_bins >= 2                         ->  GENUINE_STOCKOUT
-else                                       ->  AMBIGUOUS
-```
 
-Where, over a time window (default last 1 day) and `irt_ticket_id IS NOT NULL`:
-- `distinct_fsns` = count of distinct FSNs that failed in a given (wh, bin)
-- `distinct_bins` = count of distinct BINs in which a given (wh, fsn) failed
+The default diagnosis window is recent data from the last one day. This keeps the result operationally relevant while avoiding stale failures from permanently affecting the diagnosis.
 
 ---
 
-## 3. Design Decisions (Detailed)
-
-This section records each decision, the options considered, the choice, and the rationale/risks. (Format follows the context repo's `AGENTS.md`: compare >= 2 options, then choose the simplest.)
-
-### DD-1 · Keep the PS verdict logic as the deterministic core
-
-- **Options**: (a) Re-derive thresholds via ML; (b) keep the PS SQL CASE logic verbatim.
-- **Decision**: (b) — implement the PS thresholds verbatim as the deterministic baseline verdict.
-- **Why**: The PS success metric is ">= 70% match against analysts," and the PS already validated this logic. ML is explicitly out of scope. Determinism makes verdicts auditable and reproducible.
-- **Risk**: Thresholds may be too rigid -> mitigated by surfacing the raw counts + graph signals so a human can override.
-
-### DD-2 · Graph signals queried dynamically by LLM
-
-- **Options**: (a) Pre-compute all graph signals for every diagnosis row; (b) let LLM query signals dynamically based on the question.
-- **Decision**: (b) — graph signals are queried on-demand by the LLM agent using nGQL tools.
-- **Why**: More flexible (agent can explore arbitrary graph paths), less overhead (only query what's needed), and aligns with Ollama's tool-calling paradigm. The deterministic verdict still stands alone if graph is unavailable.
-- **Risk**: Slower UX (wait for LLM to query) -> mitigated by FAST mode (10s) and auto-bootstrap for common questions.
-
-| Signal | Hypothesis it tests | WMS grounding | Graph path |
-|--------|---------------------|---------------|-----------|
-| **Picker overlap** | Failures in a BIN concentrate on one picker -> process/skill issue, not phantom | Picking Service: picker (`picklist_assigned_to`) raises INF | `Picker -[ASSIGNED_TO]-> Picklist -[FAILED_AT]-> BIN` |
-| **Shared inbound batch** | FSNs failing across BINs share a GRN -> mis-receive / wrong putaway at inbound | Inventory `grnId` + Inbound `GrnEvent` | `FSN -[RECEIVED_IN]-> GRN -[PUTAWAY_TO]-> BIN` |
-| **IRT / stocktake feedback** | Did a PHANTOM action actually fix it? | Inv-Audit: stocktake -> `InventoryItemVariance` (negative = confirmed loss) | `BIN -[STOCKTAKE]-> Variance` |
-| **ATP cross-check** | Is a GENUINE_STOCKOUT true depletion or cache drift? | Inventory Service: `ATP = 0` vs no promisable inventory | (SQL/inventory side-lookup) |
-
-### DD-3 · Two stores — StarRocks (analytics) + NebulaGraph (graph)
-
-- **Options**: (a) SQL only; (b) graph only; (c) both, as the PS specifies.
-- **Decision**: (c) — StarRocks for set-based aggregation, NebulaGraph for multi-hop traversals.
-- **Why**: Counting failures per (wh,bin,fsn) is a natural SQL aggregation. Tracing picker overlaps and shared inbound batches is multi-hop and costly in SQL — exactly NebulaGraph's strength (as the PS notes). Matches the prescribed stack.
-- **Risk**: Two stores add ops overhead -> mitigated by a thin 1-min ETL and Dockerized local infra.
-
-### DD-4 · Single source table, no secondary MVs
-
-- **Decision**: Read only `hl_customer_outbound.pendency_mv`; build no new StarRocks MVs (hard PS guardrail).
-- **Note**: For the inbound-batch signal we reference a `grn_id` column. In the demo this is an added column on the dummy `pendency_mv` table (not a new MV). With leads we must confirm whether GRN is already joinable; if not, the shared-batch signal degrades gracefully and the rest of the system is unaffected.
-
-### DD-5 · FastAPI backend with 3 endpoints
-
-- **Decision**: `GET /diagnoses`, `POST /ask`, `GET/POST /feedback`.
-- **Why**: Mirrors the PS architecture (relational responses on `/diagnoses`, LLM tool execution on `/ask`) and adds feedback for the closed loop. FastAPI is the PS-specified framework and is fast to stand up.
-
-### DD-6 · LLM agent with mandatory citations (Ollama local)
-
-- **Options**: (a) free-form LLM answers; (b) tool-calling agent that must cite every claim; (c) cloud API vs local inference.
-- **Decision**: (b) with local **Ollama** (llama3.1:8b by default) — single-model tool loop with extensive deterministic fallbacks.
-- **Why**: The PS makes citation a hard success metric ("every single claim"). Tool-grounding also prevents hallucinated warehouse facts. Local Ollama is **cost-effective** (no per-token charges) and **data-private** (no external API calls). Smaller models need deterministic helpers (auto-bootstrap, SQL extraction, hallucination blocking).
-- **Risk**: Weaker models may struggle with tool calling -> mitigated by robust fallback logic in agent.py.
-
-### DD-7 · Closed-loop feedback via `recommendation_log`
-
-- **Decision**: Persist every suggestion -> action -> outcome in a `recommendation_log` table; the Feedback View reads from it.
-- **Why**: The PS requires "audit-ready evidence strings" linking UI suggestions to ops changes and resolution outcomes. This is the only new table we own (allowed — it's not a StarRocks MV).
-
-### DD-8 · Stack & repo strategy
-
-- **Decision**: Follow the PS stack exactly — **Python FastAPI + React + NebulaGraph + StarRocks**, all Dockerized. The existing Java/Maven archetype in this repo is left untouched and unused.
-- **Why**: The PS prescribes this stack; the Java archetype was scaffolding only. Mixing stacks would add friction for no benefit.
-
-### DD-9 · Demo data strategy
-
-- **Decision**: A Python generator seeds one dark store with clusters engineered to make each verdict obvious (see §6).
-- **Why**: A compelling demo needs deterministic, explainable scenarios rather than random noise. Seeding known ground-truth also lets us measure the >= 70% accuracy metric.
-
----
-
-## 4. Architecture
+## 4. Current Architecture
 
 ```mermaid
 flowchart TD
-  UI["React UI<br/>Diagnoses Table · Assistant · Feedback"] -->|REST| API["FastAPI Backend"]
-  API -->|SQL| SR["StarRocks<br/>hl_customer_outbound.pendency_mv"]
-  API -->|nGQL| NG["NebulaGraph<br/>nodes & edges"]
-  SR -->|1-min ETL cron| NG
-  API -->|tools: SQL + nGQL| LLM["LLM Agent<br/>Haiku route · Sonnet reason"]
-  API --> RL[("recommendation_log")]
+  UI["React UI<br/>Diagnoses table<br/>Assistant<br/>Feedback"]
+  API["FastAPI backend<br/>/api/diagnoses<br/>/api/ask<br/>/api/feedback"]
+  SR["StarRocks<br/>hl_customer_outbound.pendency_mv<br/>recommendation_log"]
+  ETL["APScheduler ETL<br/>1-minute StarRocks to graph sync"]
+  NG["NebulaGraph<br/>FSN, BIN, Picker, Order, GRN"]
+  LLM["Ollama<br/>llama3.1:8b<br/>OpenAI-compatible API"]
+
+  UI -->|REST| API
+  API -->|SQL verdicts and feedback| SR
+  SR -->|recent INF rows| ETL
+  ETL -->|vertices and edges| NG
+  API -->|tool: query_starrocks| SR
+  API -->|tool: query_nebulagraph| NG
+  API -->|tool loop| LLM
 ```
 
-| Layer | Choice | Responsibility |
-|-------|--------|----------------|
-| Analytics | StarRocks | Aggregate INF events, compute verdict counts |
-| Graph | NebulaGraph | Multi-hop signals (queried dynamically by LLM) |
-| Backend | FastAPI (Python) | Diagnoses API, LLM orchestration, feedback |
-| ETL | Python cron (1-min) | Sync StarRocks rows -> graph nodes/edges |
-| LLM | Ollama (llama3.1:8b) | Tool loop with deterministic fallbacks, always cite |
-| UI | React | 3 surfaces (table, assistant, feedback) |
-| Infra | Docker Compose | Local one-command bring-up |
+| Layer | Technology | Responsibility |
+| --- | --- | --- |
+| Frontend | React | Shows diagnoses, assistant answers, citations, and feedback status. |
+| Backend | FastAPI | Owns HTTP routes, orchestration, validation, config, and scheduler startup. |
+| Analytics store | StarRocks | Stores `pendency_mv` demo source and computes count-based verdicts. |
+| Feedback store | StarRocks `recommendation_log` | Stores recommendation lifecycle and before/after failure counts. |
+| Graph store | NebulaGraph | Stores multi-hop relationships for picker, GRN, order, BIN, and FSN evidence. |
+| ETL | Python + APScheduler | Copies recent rows from StarRocks into NebulaGraph every minute. |
+| Assistant | Ollama `llama3.1:8b` | Uses guarded SQL/nGQL tools and returns cited explanations. |
+| Infra | Docker Compose | Runs local StarRocks, NebulaGraph, backend, frontend, and scripts. |
 
 ---
 
-## 5. Data Model
+## 5. Runtime Flows
 
-### 5.1 StarRocks source — `hl_customer_outbound.pendency_mv` (read-only)
+### 5.1 Diagnoses Table
 
-| Column | Meaning |
-|--------|---------|
-| `reservation_warehouse_id` | Dark store ID (wh) |
-| `picklist_source_location_label` | Physical slot (BIN) |
-| `picklist_item_fsn` | Product (FSN) |
-| `irt_ticket_id` | Non-null = active INF event |
-| `irt_ticket_type` | Infraction categorization enum |
-| `picklist_assigned_to` | Picker ID |
-| `order_id` | Impacted customer order |
-| `updated_at` | Timestamp |
-| `grn_id` *(demo-added)* | Inbound batch — enables shared-batch signal |
-
-### 5.2 NebulaGraph schema
-
-- **Tags (nodes)**: `FSN`, `BIN`, `Picker`, `Order`, `GRN`
-- **Edges**: `FAILED_AT` (FSN->BIN), `PICKED_FROM` (Order->BIN), `ASSIGNED_TO` (Picker->Picklist/BIN), `RECEIVED_IN` (FSN->GRN), `PUTAWAY_TO` (GRN->BIN)
-
-```mermaid
-flowchart LR
-  FSN -->|FAILED_AT| BIN
-  Order -->|PICKED_FROM| BIN
-  Picker -->|ASSIGNED_TO| BIN
-  FSN -->|RECEIVED_IN| GRN
-  GRN -->|PUTAWAY_TO| BIN
+```text
+React DiagnosesTable
+  -> GET /api/diagnoses?warehouse_id=...
+  -> FastAPI diagnoses router
+  -> diagnosis service runs verdict SQL in StarRocks
+  -> rows are ranked and returned as JSON
+  -> React renders verdict, counts, recovery estimate, and Log Rec action
 ```
 
-### 5.3 `recommendation_log` (owned by this system)
+The diagnoses endpoint is intentionally deterministic. It does not require the LLM to produce a verdict.
+
+### 5.2 Graph Sync
+
+```text
+FastAPI startup
+  -> initializes NebulaGraph connection pool
+  -> starts APScheduler
+  -> run_etl_sync executes every 1 minute
+  -> reads rows newer than the in-memory watermark
+  -> writes FSN, BIN, Picker, Order, GRN vertices and edges
+```
+
+The graph is not the source of truth for the base verdict. It is an explanation and investigation layer.
+
+### 5.3 Assistant
+
+```text
+React Assistant
+  -> POST /api/ask
+  -> agent.py starts an Ollama tool loop
+  -> generated SQL/nGQL is validated by guards.py
+  -> StarRocks and/or NebulaGraph tools return capped evidence
+  -> every successful tool result becomes a citation
+  -> answer is returned with citations, partial flag, iterations, and elapsed_ms
+```
+
+The assistant is not allowed to answer factual warehouse questions from memory. It must ground claims in tool results.
+
+### 5.4 Feedback Loop
+
+```text
+Diagnosis row
+  -> user clicks Log Rec
+  -> POST /api/feedback creates recommendation_log row
+  -> backend captures failures_before
+  -> user advances suggested -> acknowledged -> executed -> verified
+  -> backend captures failures_after and resolved_at
+  -> Feedback view shows whether failures ceased
+```
+
+This closes the loop from diagnosis to action to outcome.
+
+---
+
+## 6. Data Model
+
+### 6.1 StarRocks Source: `hl_customer_outbound.pendency_mv`
+
+The production design reads only the prescribed source view/table and does not create new StarRocks materialized views.
 
 | Column | Meaning |
-|--------|---------|
-| `id` | PK |
-| `warehouse_id`, `bin`, `fsn` | Diagnosis key |
-| `verdict` | PHANTOM / GENUINE_STOCKOUT / DUAL / AMBIGUOUS |
-| `action` | Suggested action (stocktake / replenish) |
-| `status` | suggested / acknowledged / executed / verified |
-| `suggested_at`, `resolved_at` | Timestamps |
-| `evidence_ref` | Cited SQL/graph evidence string |
-| `failures_before`, `failures_after` | Closed-loop verification counts |
+| --- | --- |
+| `reservation_warehouse_id` | Warehouse or dark-store identifier. |
+| `picklist_source_location_label` | Physical BIN label. |
+| `picklist_item_fsn` | Product identifier. |
+| `irt_ticket_id` | Non-null value marks an INF-like failure used for diagnosis. |
+| `irt_ticket_type` | Ticket category, pending exact production enum confirmation. |
+| `picklist_assigned_to` | Picker identifier. |
+| `order_id` | Impacted customer order. |
+| `updated_at` | Event/update timestamp used for diagnosis windows and ETL watermarking. |
+| `grn_id` | Demo-added inbound batch field used to demonstrate shared-GRN signals. |
+
+### 6.2 NebulaGraph
+
+| Graph element | Purpose |
+| --- | --- |
+| `FSN` vertex | Product/item. |
+| `BIN` vertex | Compound warehouse/BIN physical location. |
+| `Picker` vertex | Picker involved in pick attempts. |
+| `Order` vertex | Customer order touched by the failure. |
+| `GRN` vertex | Inbound batch/goods receipt reference. |
+| `FAILED_AT` edge | Connects FSN to BIN failure location. |
+| `PICKED_FROM` edge | Connects order to BIN. |
+| `ASSIGNED_TO` edge | Connects picker to BIN/pick responsibility. |
+| `RECEIVED_IN` edge | Connects FSN to GRN. |
+| `PUTAWAY_TO` edge | Connects GRN to BIN. |
+
+BIN vertex IDs use a compound format:
+
+```text
+warehouse_id:bin_label
+```
+
+This prevents the same BIN label in different warehouses from being incorrectly merged.
+
+### 6.3 Feedback: `recommendation_log`
+
+| Column | Meaning |
+| --- | --- |
+| `id` | Primary key. |
+| `warehouse_id`, `bin`, `fsn` | Diagnosis key. |
+| `verdict` | `PHANTOM_INVENTORY`, `GENUINE_STOCKOUT`, `DUAL`, or `AMBIGUOUS`. |
+| `action` | Derived server-side from verdict. |
+| `status` | `suggested`, `acknowledged`, `executed`, or `verified`. |
+| `suggested_at`, `resolved_at` | Lifecycle timestamps. |
+| `evidence_ref` | Lightweight evidence pointer captured at recommendation time. |
+| `failures_before`, `failures_after` | Counts used to compute whether failures decreased or ceased. |
 
 ---
 
-## 6. Dummy Data Scenarios
+## 7. Graph and Assistant Signals
 
-The generator seeds one dark store with these ground-truth clusters:
+| Signal | Question answered | Evidence source |
+| --- | --- | --- |
+| Picker overlap | Are failures concentrated around one picker or process path? | NebulaGraph picker/BIN relationships. |
+| Shared GRN | Did failing FSNs share an inbound batch or putaway path? | NebulaGraph FSN-GRN-BIN relationships. |
+| Stocktake/IRT feedback | Did an operational action reduce future failures? | `recommendation_log` and failure counts. |
+| ATP proxy | Is a genuine stockout likely because the FSN fails across many BINs? | SQL-derived proxy in demo; production should call a real ATP/inventory service. |
 
-| Scenario | Shape | Expected verdict |
-|----------|-------|------------------|
-| **Phantom BIN** | Many distinct FSNs failing in one BIN | PHANTOM |
-| **Genuine stockout FSN** | One FSN failing across many BINs | GENUINE_STOCKOUT |
-| **Picker-driven cluster** | One picker, one BIN, several fails | PHANTOM verdict but graph flags picker concentration |
-| **Shared-GRN cluster** | FSNs failing that share a `grn_id` | GENUINE-like, but graph flags inbound batch root cause |
-| **Background noise** | Random low-volume fails + non-INF rows | AMBIGUOUS / filtered out |
-| **Resolved cases** | A few `recommendation_log` rows where failures ceased after action | Feedback View demo |
+Current implementation choice: graph signals are queried dynamically by the assistant instead of being precomputed for every `/api/diagnoses` row. This keeps the table fast and lets the assistant ask only the graph questions relevant to the user's natural-language question.
 
 ---
 
-## 7. UI Surfaces (from the PS)
+## 8. Technical Decisions
 
-1. **Diagnoses Table** — ranked list by (wh, BIN, FSN) with verdict, the raw evidence counts (distinct_fsns / distinct_bins / picker concentration / shared GRN), and an expected fill-rate recovery projection.
-2. **Ask the Assistant** — NL box ("Why is BIN F1-05-5D failing?", "How can I improve fill rate today?"). Every answer cites the exact SQL rows / nGQL paths used.
-3. **Feedback View** — closed-loop tracking from `recommendation_log`: was the action taken, and did the localized failures cease?
+This section distills the project decisions captured across `docs/learning/*/technical-decisions.md` and `important-tech-decisions.md`.
+
+### TD-1: Deterministic Rules Are The Verdict Source
+
+The base verdict uses the problem-statement SQL thresholds instead of a trained model. This makes every verdict explainable, testable, and comparable against analyst judgment. ML forecasting and custom classifiers remain out of scope.
+
+Trade-off: rigid thresholds may mark some real issues as `AMBIGUOUS`. The mitigation is to expose raw counts, graph evidence, citations, and human feedback.
+
+### TD-2: StarRocks For Aggregation, NebulaGraph For Relationships
+
+StarRocks is the right place for count-based questions such as distinct FSNs per BIN and distinct BINs per FSN. NebulaGraph is used for relationship questions such as picker overlap, shared GRN, and multi-hop investigation.
+
+Decision summary:
+
+```text
+StarRocks = verdict source
+NebulaGraph = enrichment and explanation source
+```
+
+### TD-3: Graph And LLM Are Additive, Not Blocking
+
+If graph sync fails or Ollama is down, the deterministic `/api/diagnoses` endpoint can still return useful results. This protects the operational workflow from optional enrichment failures.
+
+### TD-4: Read Only `pendency_mv`; Do Not Add StarRocks MVs
+
+The system follows the guardrail to read only `hl_customer_outbound.pendency_mv` for raw warehouse failure data. The local demo creates a table with the same role because production data is unavailable locally, but the design does not depend on new materialized views.
+
+### TD-5: Store Feedback Separately In `recommendation_log`
+
+The app owns recommendation lifecycle data because it represents system actions and outcomes, not raw warehouse source facts. For the demo, this table lives in StarRocks to keep infrastructure small and allow easy comparison with failure counts.
+
+Production caveat: a transactional database such as PostgreSQL or MySQL would be cleaner for lifecycle updates at scale.
+
+### TD-6: Keep Backend Layers Separated
+
+Backend code is split by responsibility:
+
+```text
+routers  = HTTP request/response handling
+services = business logic and orchestration
+db       = StarRocks and NebulaGraph clients
+```
+
+This keeps endpoint code thin and makes diagnosis, assistant, ETL, and feedback behavior easier to test or change independently.
+
+### TD-7: Centralized Config With Environment Overrides
+
+`backend/config.py` centralizes StarRocks, NebulaGraph, LLM, diagnosis, and assistant settings. Defaults keep the demo easy to run, while `.env` and environment variables allow Docker and production-style overrides.
+
+### TD-8: Short-Lived StarRocks Connections, Pooled NebulaGraph Sessions
+
+StarRocks uses simple short-lived PyMySQL connections, which is acceptable for the demo. NebulaGraph uses a shared connection pool because the client is pool-oriented and graph sessions are reused across requests and ETL work.
+
+Production caveat: StarRocks should use a real connection pool under higher traffic.
+
+### TD-9: ETL Runs Inside FastAPI For Demo Simplicity
+
+APScheduler runs `run_etl_sync` every minute inside the backend process. This avoids an extra worker service and keeps local setup simple.
+
+Production caveat: if multiple backend replicas run, each could execute the same job. A production deployment should move ETL into a separate worker/scheduler with persisted watermarking and monitoring.
+
+### TD-10: Incremental ETL Uses An In-Memory Watermark
+
+The ETL reads rows newer than `_watermark`, initially set far in the past so the first run copies all seed data. Graph writes use `IF NOT EXISTS` to make repeated syncs safe for the demo.
+
+Production caveat: the watermark should be persisted, and repeated events should have a deliberate update/multi-edge strategy.
+
+### TD-11: Ollama Replaced The Older Cloud Two-Model Design
+
+The current assistant uses one local Ollama model, `llama3.1:8b`, through an OpenAI-compatible client.
+
+Benefits:
+
+- no per-token cloud cost;
+- better data privacy for warehouse data;
+- simpler local setup once Ollama is installed;
+- model can be swapped through config.
+
+Trade-off: smaller local models need more deterministic guardrails and fallback logic.
+
+### TD-12: Assistant Queries Are Guarded And Cited
+
+All LLM-generated SQL and nGQL is validated before execution. The assistant tools are read-only, row-capped, and citation-producing. The agent includes defensive fallbacks for JSON recovery, SQL extraction, timeout synthesis, and hallucination blocking.
+
+This supports the hard project requirement that every assistant claim should be backed by evidence.
+
+### TD-13: FAST And THOROUGH Assistant Modes
+
+The assistant supports a quick operational mode and a deeper investigation mode:
+
+```text
+FAST     = 10 second budget
+THOROUGH = 30 second budget
+```
+
+The response includes metadata such as `partial`, `iterations`, and `elapsed_ms` so debugging assistant behavior is easier.
+
+### TD-14: Feedback Transitions Are Enforced Server-Side
+
+Feedback status must move in order:
+
+```text
+suggested -> acknowledged -> executed -> verified
+```
+
+The frontend can show the next action, but the backend enforces valid transitions and derives the operational action from the verdict. This avoids frontend/backend drift and protects the audit trail.
+
+### TD-15: Demo Data Is Deterministic
+
+The seed generator creates known scenarios for phantom inventory, genuine stockout, dual patterns, picker-driven clusters, shared-GRN clusters, ambiguous noise, and resolved cases. This makes demos predictable and helps validate the verdict rules.
+
+Continuous generation is separate from one-time seeding so the project can support both reproducible demos and live-event simulation.
 
 ---
 
-## 8. Success Metrics (from the PS)
+## 9. UI Surfaces
 
-| Metric | Target |
-|--------|--------|
-| Verdict accuracy vs analysts | >= 70% |
-| E2E latency (interaction -> render) | < 10s |
-| Assistant citation coverage | 100% of claims |
-| Pilot uptime | >= 1 week, 1 dark store |
-| Audit-ready evidence | suggestion -> action -> outcome linkage |
+| Surface | Purpose |
+| --- | --- |
+| Diagnoses Table | Shows ranked diagnosis rows with verdict, counts, recovery estimate, and recommendation logging. |
+| Ask The Assistant | Accepts natural-language questions and returns cited SQL/graph-backed explanations. |
+| Feedback View | Tracks recommendations through action and outcome, including before/after failure counts. |
 
----
-
-## 9. Open Clarifications (PS §7 — confirm with leads)
-
-- Exact `irt_ticket_type` enum value that strictly isolates an INF (demo assumes `irt_ticket_id IS NOT NULL`).
-- Is `picklist_source_location_label` 1:1 with the physical BIN across all regions?
-- How are stocktake/replenishment closures pushed back into logs (for clean feedback measurement)?
-- UI auth system (Flipkart SSO?) — demo uses a stub login.
-- Per-warehouse LLM token/cost ceiling.
-- Managed NebulaGraph cluster vs self-hosted.
+The UI is intentionally operational rather than decorative: operators should quickly see what is failing, why the system believes it, and what action to take.
 
 ---
 
-## 10. Risks & Mitigations
+## 10. Demo Data Scenarios
+
+| Scenario | Shape | Expected result |
+| --- | --- | --- |
+| Phantom BIN | Several distinct FSNs fail in one BIN. | `PHANTOM_INVENTORY` |
+| Genuine stockout FSN | One FSN fails across multiple BINs. | `GENUINE_STOCKOUT` |
+| Dual case | Many FSNs and many BINs cross both thresholds. | `DUAL` |
+| Picker-driven cluster | Failures concentrate around one picker/BIN relationship. | SQL verdict plus graph explanation. |
+| Shared-GRN cluster | Failing FSNs share inbound batch evidence. | Graph flags possible inbound/putaway issue. |
+| Ambiguous noise | Low-volume failures below thresholds. | `AMBIGUOUS` |
+| Resolved feedback | Logged actions with reduced later failures. | Feedback view shows closure evidence. |
+
+---
+
+## 11. Quality Attributes
+
+| Attribute | Design support |
+| --- | --- |
+| Explainability | Deterministic rules, raw counts, citations, evidence references. |
+| Reliability | SQL verdict works without graph/LLM; graph failures are tolerated. |
+| Latency | `/api/diagnoses` avoids LLM dependency; assistant has FAST mode and row caps. |
+| Auditability | `recommendation_log` links recommendation, action, status, and outcome. |
+| Privacy/cost | Ollama runs locally with no per-token cloud billing. |
+| Maintainability | Router/service/db split, centralized config, documented decisions. |
+| Demo reproducibility | Deterministic seed data plus smoke-test flow. |
+
+---
+
+## 12. Risks And Mitigations
 
 | Risk | Mitigation |
-|------|-----------|
-| Graph store unavailable | Deterministic verdict still works from SQL alone; graph signals are additive |
-| GRN not joinable in real `pendency_mv` | Shared-batch signal degrades gracefully; confirm with leads |
-| LLM hallucination | Tool-grounded answers + mandatory citation enforcement |
-| LLM cost overrun | Haiku-first routing + per-warehouse ceiling |
-| Latency > 10s | Cache verdict computation; pre-warm graph; keep ETL window small |
+| --- | --- |
+| Thresholds miss edge cases | Return `AMBIGUOUS`, show counts, use graph/assistant evidence, and collect feedback. |
+| NebulaGraph unavailable | Keep `/api/diagnoses` SQL-only and treat graph as additive. |
+| Ollama unavailable or weak tool calling | Use deterministic fallbacks, citation checks, and SQL/graph guards. |
+| ETL watermark lost on restart | Acceptable for demo; production should persist checkpoint state. |
+| Duplicate ETL jobs in multi-replica backend | Move ETL to a separate worker/scheduler in production. |
+| Shared GRN not available in production source | Degrade the shared-GRN signal and confirm joinability with warehouse/inbound data owners. |
+| Feedback table is OLTP-like but stored in StarRocks | Accept for demo; use PostgreSQL/MySQL in production if lifecycle volume grows. |
+| API/frontend contract drift | Keep Assistant and Feedback response schemas documented and update UI when backend metadata changes. |
+| Overly permissive demo CORS | Restrict allowed origins in production. |
+
+---
+
+## 13. Open Clarifications
+
+- Exact `irt_ticket_type` values that should count as INF in production.
+- Whether `picklist_source_location_label` is always a stable physical BIN identifier across regions.
+- How production stocktake/replenishment completion events can be joined back for clean outcome measurement.
+- Whether GRN/inbound batch is available from `pendency_mv` or requires a separate join/source.
+- Production UI authentication and authorization model.
+- Production deployment choice for NebulaGraph and Ollama.
+- Whether feedback should remain in StarRocks or move to an OLTP store for production.
+
+---
+
+## 14. Current Runbook
+
+Prerequisites:
+
+```text
+Install Ollama
+ollama pull llama3.1:8b
+ollama serve
+```
+
+Local run:
+
+```bash
+cp .env.example .env
+docker compose -f infra/docker-compose.yml up --build
+bash infra/init_schema.sh
+python data/generate_dummy_data.py --clear
+```
+
+Open:
+
+```text
+http://localhost:3000
+```
+
+Smoke test:
+
+```bash
+bash infra/smoke_test.sh
+```
