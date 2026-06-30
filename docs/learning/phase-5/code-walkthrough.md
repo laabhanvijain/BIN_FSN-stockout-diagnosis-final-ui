@@ -295,58 +295,6 @@ Meaning:
 Stop the scheduler when the backend stops.
 ```
 
-## File 3: `data/schema/nebula.ngql`
-
-This file defines the graph structure that ETL writes into.
-
-Tags:
-
-```text
-FSN
-BIN
-Picker
-Order
-GRN
-Variance
-```
-
-Edges:
-
-```text
-FAILED_AT
-PICKED_FROM
-ASSIGNED_TO
-RECEIVED_IN
-PUTAWAY_TO
-STOCKTAKE
-```
-
-Phase 5 writes all except:
-
-```text
-Variance
-STOCKTAKE
-```
-
-Those are for later closed-loop stocktake signals.
-
-## File 4: `docs/code-walkthroughs/etl-sync.md`
-
-This older walkthrough correctly explains the main flow:
-
-```text
-every 60 seconds
-read rows newer than watermark
-write vertices and edges
-advance watermark
-```
-
-But remember the nuance:
-
-```text
-actual code uses IF NOT EXISTS, so existing graph elements are skipped, not updated.
-```
-
 ## End-To-End Phase 5 Flow
 
 ```text
